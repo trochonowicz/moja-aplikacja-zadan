@@ -97,10 +97,30 @@ passport.use(new GoogleStrategy({
 }));
 
 // --- ENDPOINTY ---
-app.get('/auth/google', passport.authenticate('google', {
-    access_type: 'offline',
-    prompt: 'consent'
-}));
+const { URLSearchParams } = require('url'); // Upewnij się, że ta linia jest na górze pliku, jeśli jej tam nie ma
+
+// --- ENDPOINTY ---
+app.get('/auth/google', (req, res) => {
+    // Dynamiczne tworzenie redirect_uri
+    const protocol = req.protocol; // http lub https
+    const host = req.get('host');   // localhost:3000 lub moja-aplikacja-zadan.onrender.com
+    const redirect_uri = `${protocol}://${host}/auth/google/callback`;
+
+    console.log('[Auth] Dynamicznie utworzony redirect_uri:', redirect_uri);
+
+    const params = new URLSearchParams({
+        client_id: process.env.GOOGLE_CLIENT_ID,
+        redirect_uri: redirect_uri, // Używamy nowej, dynamicznej zmiennej
+        response_type: 'code',
+        scope: 'profile email https://www.googleapis.com/auth/calendar.events',
+        access_type: 'offline',
+        prompt: 'consent'
+    });
+
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+
+    res.redirect(authUrl);
+});
 
 app.get('/auth/google/callback',
     passport.authenticate('google', { failureRedirect: '/' }),
