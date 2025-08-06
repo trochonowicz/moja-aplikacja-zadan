@@ -1,0 +1,8 @@
+# Dependencies
+node_modules
+
+# Environment variables
+.env
+
+# Database file (contains sensitive tokens!)
+database.json
