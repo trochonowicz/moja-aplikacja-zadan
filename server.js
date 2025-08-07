@@ -1,4 +1,4 @@
-// server.js - Wersja z bazą danych PostgreSQL i rozszerzoną synchronizacją Google Calendar
+// server.js - Wersja produkcyjna dla serwera Render
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
@@ -10,8 +10,6 @@ const { Pool } = require('pg');
 const { v4: uuidv4 } = require('uuid');
 
 // --- KONFIGURACJA ---
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -21,16 +19,14 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// ZMIENNA Z ID KALENDARZA
-const CALENDAR_ID = 'primary'; // Używamy kalendarza głównego zalogowanego użytkownika
-
 // --- MIDDLEWARE ---
 app.use(express.json());
 app.use(session({
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: true,
-    cookie: { maxAge: 30 * 24 * 60 * 60 * 1000 } // 30 dni
+    // Ustawienie 'secure: 'auto'' jest zalecane przez Render dla obsługi HTTPS
+    cookie: { secure: 'auto', maxAge: 30 * 24 * 60 * 60 * 1000 }
 }));
 app.use(passport.initialize());
 app.use(passport.session());
@@ -44,16 +40,14 @@ passport.deserializeUser((user, done) => {
 });
 
 passport.use(new GoogleStrategy({
-    clientID: GOOGLE_CLIENT_ID,
-    clientSecret: GOOGLE_CLIENT_SECRET,
-    callbackURL: process.env.GOOGLE_CALLBACK_URL || "http://localhost:3000/auth/google/callback",
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    // Adres zwrotny jest pobierany wyłącznie ze zmiennej środowiskowej
+    callbackURL: process.env.GOOGLE_CALLBACK_URL,
     scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events'],
     accessType: 'offline',
     prompt: 'consent'
 }, async (accessToken, refreshToken, profile, done) => {
-    console.log("--- Logowanie z GoogleStrategy ---");
-    console.log("Profile ID:", profile.id);
-
     try {
         const userId = profile.id;
         const userEmail = profile.emails[0].value;
@@ -66,31 +60,23 @@ passport.use(new GoogleStrategy({
             };
             await pool.query('INSERT INTO users (id, email, data, access_token, refresh_token) VALUES ($1, $2, $3, $4, $5)', 
                 [userId, userEmail, JSON.stringify(initialUserData), accessToken, refreshToken]);
-            console.log(`[Auth] Nowy użytkownik ${userId} zapisany.`);
         } else {
             let query = 'UPDATE users SET access_token = $1, email = $3 WHERE id = $2';
             let values = [accessToken, userId, userEmail];
             if (refreshToken) {
                 query = 'UPDATE users SET access_token = $1, refresh_token = $2, email = $4 WHERE id = $3';
                 values = [accessToken, refreshToken, userId, userEmail];
-                console.log(`[Auth] Zaktualizowano tokeny (w tym refresh) dla użytkownika ${userId}.`);
-            } else {
-                console.log(`[Auth] Zaktualizowano access token dla użytkownika ${userId}.`);
             }
             await pool.query(query, values);
         }
-
         const user = { id: userId, email: userEmail, profile, accessToken, refreshToken };
         return done(null, user);
-
     } catch (error) {
-        console.error("[Auth] Błąd podczas operacji na bazie danych:", error);
         return done(error, null);
     }
 }));
 
 // --- ENDPOINTY APLIKACJI ---
-app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.static(__dirname));
 
 function isLoggedIn(req, res, next) {
@@ -108,57 +94,42 @@ app.get('/auth/logout', (req, res, next) => {
     });
 });
 
-// API do sprawdzania statusu logowania
+// API: Sprawdzanie statusu logowania
 app.get('/api/auth/status', (req, res) => {
     if (req.isAuthenticated() && req.user && req.user.profile) {
         res.json({
             loggedIn: true,
-            user: {
-                id: req.user.id,
-                displayName: req.user.profile.displayName,
-                email: req.user.email
-            }
+            user: { id: req.user.id, displayName: req.user.profile.displayName, email: req.user.email }
         });
-    } else {
-        res.json({ loggedIn: false });
-    }
+    } else { res.json({ loggedIn: false }); }
 });
 
-// API do danych użytkownika
+// API: Pobieranie danych
 app.get('/api/data', isLoggedIn, async (req, res) => {
     try {
         const result = await pool.query('SELECT data FROM users WHERE id = $1', [req.user.id]);
-        if (result.rowCount > 0) res.json(result.rows[0].data);
-        else res.status(404).json({ message: 'Dane użytkownika nie znalezione' });
-    } catch (error) {
-        console.error('Błąd odczytu danych:', error);
-        res.status(500).json({ message: 'Błąd serwera' });
-    }
+        res.json(result.rows[0].data);
+    } catch (error) { res.status(500).json({ message: 'Błąd serwera' }); }
 });
 
+// API: Zapisywanie danych
 app.post('/api/data', isLoggedIn, async (req, res) => {
     try {
         await pool.query('UPDATE users SET data = $1 WHERE id = $2', [JSON.stringify(req.body), req.user.id]);
-        res.status(200).json({ message: 'Dane zapisane pomyślnie' });
-    } catch (error) {
-        console.error('Błąd zapisu danych:', error);
-        res.status(500).json({ message: 'Błąd serwera' });
-    }
+        res.status(200).json({ message: 'Dane zapisane' });
+    } catch (error) { res.status(500).json({ message: 'Błąd serwera' }); }
 });
 
-// API do synchronizacji z Google Calendar
+// API: Synchronizacja z Google Calendar
 app.post('/api/sync', isLoggedIn, async (req, res) => {
     const { task } = req.body;
-    const { id: userId, accessToken, refreshToken } = req.user;
-
-    const oauth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
+    const { accessToken, refreshToken } = req.user;
+    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
     oauth2Client.setCredentials({ access_token: accessToken, refresh_token: refreshToken });
-
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-
     try {
         if (task.googleCalendarEventId && !task.dueDate) {
-            await calendar.events.delete({ calendarId: CALENDAR_ID, eventId: task.googleCalendarEventId, sendUpdates: 'all' });
+            await calendar.events.delete({ calendarId: 'primary', eventId: task.googleCalendarEventId, sendUpdates: 'all' });
             return res.json({ status: 'success', data: { action: 'deleted' } });
         }
         if (!task.dueDate) return res.json({ status: 'success', data: { action: 'none' } });
@@ -166,7 +137,6 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
         const startDate = new Date(task.dueDate);
         const duration = task.duration || 60;
         const endDate = new Date(startDate.getTime() + duration * 60 * 1000);
-        
         const eventData = {
             summary: task.text,
             description: task.notes || '',
@@ -175,21 +145,17 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
             attendees: (task.attendees || []).map(email => ({ email })),
             conferenceData: task.createMeetLink ? { createRequest: { requestId: uuidv4() } } : null,
         };
-
         let syncResult;
         if (task.googleCalendarEventId) {
-            syncResult = await calendar.events.update({ calendarId: CALENDAR_ID, eventId: task.googleCalendarEventId, resource: eventData, sendUpdates: 'all', conferenceDataVersion: 1 });
+            syncResult = await calendar.events.update({ calendarId: 'primary', eventId: task.googleCalendarEventId, resource: eventData, sendUpdates: 'all', conferenceDataVersion: 1 });
         } else {
-            syncResult = await calendar.events.insert({ calendarId: CALENDAR_ID, resource: eventData, sendUpdates: 'all', conferenceDataVersion: 1 });
+            syncResult = await calendar.events.insert({ calendarId: 'primary', resource: eventData, sendUpdates: 'all', conferenceDataVersion: 1 });
         }
-        
         res.json({ status: 'success', data: { ...syncResult.data, action: task.googleCalendarEventId ? 'updated' : 'created' } });
     } catch (error) {
-        console.error('Błąd API Kalendarza Google:', error.response ? error.response.data.error : error.message);
         res.status(500).json({ message: 'Błąd API Kalendarza Google' });
     }
 });
-
 
 // Główna trasa - serwuje plik index.html
 app.get('/', (req, res) => {
