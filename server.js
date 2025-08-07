@@ -7,7 +7,6 @@ const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const { google } = require('googleapis');
 const { Pool } = require('pg');
-const { URLSearchParams } = require('url');
 
 // --- KONFIGURACJA ---
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -45,9 +44,16 @@ passport.use(new GoogleStrategy({
     clientSecret: GOOGLE_CLIENT_SECRET,
     callbackURL: "https://moja-aplikacja-zadan.onrender.com/auth/google/callback",
     scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events'],
-    accessType: 'offline', // Wymusza zwrócenie refresh tokena
-    prompt: 'consent'      // Wymusza ponowne udzielenie zgody (i w efekcie refresh tokena)
+    accessType: 'offline',
+    prompt: 'consent'
 }, async (accessToken, refreshToken, profile, done) => {
+    // === Dodatkowe logowanie do diagnozy ===
+    console.log("--- Logowanie z GoogleStrategy ---");
+    console.log("Profile ID:", profile.id);
+    console.log("Access Token:", accessToken ? "Otrzymano" : "Brak");
+    console.log("Refresh Token:", refreshToken ? "Otrzymano" : "Brak");
+    console.log("---------------------------------");
+    
     try {
         const userId = profile.id;
 
@@ -62,13 +68,16 @@ passport.use(new GoogleStrategy({
 
             await pool.query('INSERT INTO users (id, data, access_token, refresh_token) VALUES ($1, $2, $3, $4)', 
                 [userId, userDataString, accessToken, refreshToken]);
+            console.log(`[Auth] Nowy użytkownik ${userId} zapisany.`);
         } else {
             if (refreshToken) {
                 await pool.query('UPDATE users SET access_token = $1, refresh_token = $2 WHERE id = $3', 
                     [accessToken, refreshToken, userId]);
+                console.log(`[Auth] Zaktualizowano tokeny dla użytkownika ${userId}. Zapisano refreshToken.`);
             } else {
                 await pool.query('UPDATE users SET access_token = $1 WHERE id = $2', 
                     [accessToken, userId]);
+                console.log(`[Auth] Zaktualizowano accessToken dla użytkownika ${userId}.`);
             }
         }
         
@@ -90,8 +99,8 @@ passport.use(new GoogleStrategy({
 app.get('/auth/google',
     passport.authenticate('google', {
         scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events'],
-        accessType: 'offline', // Wymusza zwrócenie refresh tokena
-        prompt: 'consent'      // Wymusza ponowne udzielenie zgody
+        accessType: 'offline',
+        prompt: 'consent'
     }));
 
 app.get('/auth/google/callback',
@@ -112,7 +121,6 @@ function isLoggedIn(req, res, next) {
     res.status(401).json({ message: 'Brak autoryzacji' });
 }
 
-// Użycie app.use() na górze pliku, aby poprawnie serwować pliki statyczne
 app.use(express.static('public'));
 
 app.get('/api/auth/status', (req, res) => {
