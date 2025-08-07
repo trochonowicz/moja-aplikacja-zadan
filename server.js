@@ -340,6 +340,6 @@ app.listen(PORT, async () => {
         console.error("Błąd podczas tworzenia tabeli 'users':", err);
     }
     const SYNC_INTERVAL_MS = 60 * 1000; // 1 minuta
-    setTimeout(runPeriodicSync, 5000); 
+    setTimeout(runPeriodicSync, 5000);
     setInterval(runPeriodicSync, SYNC_INTERVAL_MS);
 });
