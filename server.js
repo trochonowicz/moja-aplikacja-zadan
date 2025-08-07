@@ -20,6 +20,9 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
+// ZMIENNA Z ID KALENDARZA
+const CALENDAR_ID = 'michal.trochonowicz@legarti.pl';
+
 // --- MIDDLEWARE ---
 app.use(express.json());
 app.use(session({
@@ -179,7 +182,7 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
 
     try {
         if (task.googleCalendarEventId && !task.dueDate) {
-            await calendar.events.delete({ calendarId: 'primary', eventId: task.googleCalendarEventId });
+            await calendar.events.delete({ calendarId: CALENDAR_ID, eventId: task.googleCalendarEventId });
             return res.json({ status: 'success', data: { action: 'deleted' } });
         }
         if (!task.dueDate) {
@@ -199,10 +202,10 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
         
         let syncResult;
         if (task.googleCalendarEventId) {
-            syncResult = await calendar.events.update({ calendarId: 'primary', eventId: task.googleCalendarEventId, resource: eventData });
+            syncResult = await calendar.events.update({ calendarId: CALENDAR_ID, eventId: task.googleCalendarEventId, resource: eventData });
             console.log(`[Sync-Out] Zaktualizowano zadanie '${task.text}' w Google Calendar. EventId: ${task.googleCalendarEventId}`);
         } else {
-            syncResult = await calendar.events.insert({ calendarId: 'primary', resource: eventData });
+            syncResult = await calendar.events.insert({ calendarId: CALENDAR_ID, resource: eventData });
             console.log(`[Sync-Out] Utworzono nowe zadanie '${task.text}' w Google Calendar. EventId: ${syncResult.data.id}`);
         }
 
@@ -261,7 +264,7 @@ async function runPeriodicSync() {
             const timeMin = new Date();
             timeMin.setDate(timeMin.getDate() - 30);
             const params = {
-                calendarId: 'primary',
+                calendarId: CALENDAR_ID,
                 timeMin: timeMin.toISOString(),
                 showDeleted: true,
                 singleEvents: true
@@ -316,7 +319,7 @@ async function runPeriodicSync() {
                 if (wasUserUpdated) {
                     await pool.query('UPDATE users SET data = $1 WHERE id = $2', [JSON.stringify(userData), user.id]);
                     wasAnythingUpdated = true;
-                    console.log(`[Sync] Wykryto zmiany dla użytkownika ${user.id}. Zmiany zostaną zapisane.`);
+                    console.log(`[Sync] Wyryto zmiany dla użytkownika ${user.id}. Zmiany zostaną zapisane.`);
                 }
 
             } catch (error) {
