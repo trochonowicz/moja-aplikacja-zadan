@@ -47,7 +47,7 @@ passport.use(new GoogleStrategy({
     accessType: 'offline',
     prompt: 'consent'
 }, async (accessToken, refreshToken, profile, done) => {
-    // === Dodatkowe logowanie do diagnozy ===
+    // === Logowanie do diagnozy ===
     console.log("--- Logowanie z GoogleStrategy ---");
     console.log("Profile ID:", profile.id);
     console.log("Access Token:", accessToken ? "Otrzymano" : "Brak");
@@ -206,7 +206,6 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
             console.log(`[Sync-Out] Utworzono nowe zadanie '${task.text}' w Google Calendar. EventId: ${syncResult.data.id}`);
         }
 
-        // Dodano logikę do aktualizacji bazy danych z eventId
         const userId = req.user.id;
         const userDataResult = await pool.query('SELECT data FROM users WHERE id = $1', [userId]);
         if (userDataResult.rowCount > 0) {
@@ -273,6 +272,15 @@ async function runPeriodicSync() {
                 const googleEvents = response.data.items;
                 const userData = user.data;
                 let wasUserUpdated = false;
+
+                // --- NOWE LOGI DIAGNOSTYCZNE ---
+                console.log(`[Sync-In] Pobranych zdarzeń z Google: ${googleEvents.length}`);
+                if (googleEvents.length > 0) {
+                    googleEvents.forEach(event => {
+                        console.log(`[Sync-In] Zdarzenie z Google: ID=${event.id}, Tytuł='${event.summary}', Status=${event.status}, Data=${event.start.dateTime || event.start.date}`);
+                    });
+                }
+                // --- KONIEC NOWYCH LOGÓW ---
 
                 for (const event of googleEvents) {
                     const eventId = event.id;
