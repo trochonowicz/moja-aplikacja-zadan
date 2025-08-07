@@ -43,9 +43,10 @@ passport.deserializeUser((user, done) => {
 passport.use(new GoogleStrategy({
     clientID: GOOGLE_CLIENT_ID,
     clientSecret: GOOGLE_CLIENT_SECRET,
-    // POPRAWIONY: Zmieniono na pełny adres URL
     callbackURL: "https://moja-aplikacja-zadan.onrender.com/auth/google/callback",
-    scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events']
+    scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events'],
+    accessType: 'offline', // Wymusza zwrócenie refresh tokena
+    prompt: 'consent'      // Wymusza ponowne udzielenie zgody (i w efekcie refresh tokena)
 }, async (accessToken, refreshToken, profile, done) => {
     try {
         const userId = profile.id;
@@ -86,11 +87,12 @@ passport.use(new GoogleStrategy({
 }));
 
 // --- ENDPOINTY ---
-app.get('/auth/google', (req, res, next) => {
+app.get('/auth/google',
     passport.authenticate('google', {
-        scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events']
-    })(req, res, next);
-});
+        scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events'],
+        accessType: 'offline', // Wymusza zwrócenie refresh tokena
+        prompt: 'consent'      // Wymusza ponowne udzielenie zgody
+    }));
 
 app.get('/auth/google/callback',
     passport.authenticate('google', { failureRedirect: '/' }),
