@@ -1,4 +1,4 @@
-// server.js - Wersja finalna dla serwera Render
+// server.js - Wersja z obsługą dynamicznego czasu trwania zadania
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
@@ -9,7 +9,6 @@ const { google } = require('googleapis');
 const { Pool } = require('pg');
 const { v4: uuidv4 } = require('uuid');
 
-// --- KONFIGURACJA ---
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -18,25 +17,18 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// Informujemy Express, aby ufał proxy serwisu Render (kluczowe dla sesji)
 app.set('trust proxy', 1);
-
-// --- MIDDLEWARE ---
 app.use(express.json());
 app.use(session({
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
-    cookie: { secure: 'auto', maxAge: 30 * 24 * 60 * 60 * 1000 } // 30 dni
+    cookie: { secure: 'auto', maxAge: 30 * 24 * 60 * 60 * 1000 }
 }));
 app.use(passport.initialize());
 app.use(passport.session());
-
-// Serwowanie plików statycznych (CSS, JS, itp.) z folderu 'public'
 app.use(express.static(path.join(__dirname, 'public')));
 
-
-// --- UWIERZYTELNIANIE PASSPORT.JS ---
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((user, done) => done(null, user));
 
@@ -50,7 +42,6 @@ passport.use(new GoogleStrategy({
         const userId = profile.id;
         const userEmail = profile.emails[0].value;
         const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
-
         if (result.rowCount === 0) {
             const initialUserData = {
                 lists: [{ id: Date.now(), name: "Moje Zadania", tasks: [], sortMode: "manual" }],
@@ -59,7 +50,6 @@ passport.use(new GoogleStrategy({
             await pool.query('INSERT INTO users (id, email, data, access_token, refresh_token) VALUES ($1, $2, $3, $4, $5)', 
                 [userId, userEmail, JSON.stringify(initialUserData), accessToken, refreshToken]);
         } else {
-            // Zawsze aktualizuj tokeny, zwłaszcza refreshToken, jeśli zostanie odświeżony
             await pool.query('UPDATE users SET access_token = $1, refresh_token = $2 WHERE id = $3', [accessToken, refreshToken || result.rows[0].refresh_token, userId]);
         }
         const user = { id: userId, email: userEmail, profile, accessToken, refreshToken };
@@ -74,7 +64,6 @@ function isLoggedIn(req, res, next) {
     res.status(401).send('Not authenticated');
 }
 
-// --- ENDPOINTY APLIKACJI ---
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events'], accessType: 'offline', prompt: 'consent' }));
 app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/' }), (req, res) => res.redirect('/'));
 app.get('/auth/logout', (req, res, next) => {
@@ -126,8 +115,9 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
         if (!task.dueDate) return res.json({ status: 'success', data: { action: 'none' } });
         
         const startDate = new Date(task.dueDate);
-        const duration = task.duration || 60;
+        const duration = task.duration || 30;
         const endDate = new Date(startDate.getTime() + duration * 60 * 1000);
+        
         const eventData = {
             summary: task.text,
             description: task.notes || '',
@@ -136,6 +126,7 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
             attendees: (task.attendees || []).map(email => ({ email })),
             conferenceData: task.createMeetLink ? { createRequest: { requestId: uuidv4() } } : null,
         };
+        
         let syncResult;
         if (task.googleCalendarEventId) {
             syncResult = await calendar.events.update({ calendarId: 'primary', eventId: task.googleCalendarEventId, resource: eventData, sendUpdates: 'all', conferenceDataVersion: 1 });
@@ -149,12 +140,10 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
     }
 });
 
-// Serwowanie pliku index.html dla wszystkich pozostałych zapytań
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// --- URUCHOMIENIE SERWERA ---
 app.listen(PORT, async () => {
     console.log(`Serwer działa na porcie ${PORT}`);
     try {
