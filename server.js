@@ -50,7 +50,6 @@ passport.use(new GoogleStrategy({
     accessType: 'offline',
     prompt: 'consent'
 }, async (accessToken, refreshToken, profile, done) => {
-    // === Logowanie do diagnozy ===
     console.log("--- Logowanie z GoogleStrategy ---");
     console.log("Profile ID:", profile.id);
     console.log("Access Token:", accessToken ? "Otrzymano" : "Brak");
@@ -276,15 +275,17 @@ async function runPeriodicSync() {
                 const userData = user.data;
                 let wasUserUpdated = false;
 
-                // --- NOWE LOGI DIAGNOSTYCZNE ---
                 console.log(`[Sync-In] Pobranych zdarzeń z Google: ${googleEvents.length}`);
                 if (googleEvents.length > 0) {
                     googleEvents.forEach(event => {
                         console.log(`[Sync-In] Zdarzenie z Google: ID=${event.id}, Tytuł='${event.summary}', Status=${event.status}, Data=${event.start.dateTime || event.start.date}`);
+                        // Sprawdzamy, czy w pobranych danych jest ID nowo utworzonego zadania.
+                        if (event.id === '7m0nn3i1p5no2ln8u0ob09pi4c') {
+                            console.log(`[Sync-In] ZNALEZIONO pasujące zadanie: ID=${event.id}, Tytuł='${event.summary}'`);
+                        }
                     });
                 }
-                // --- KONIEC NOWYCH LOGÓW ---
-
+                
                 for (const event of googleEvents) {
                     const eventId = event.id;
                     let taskToUpdate = null;
@@ -319,7 +320,7 @@ async function runPeriodicSync() {
                 if (wasUserUpdated) {
                     await pool.query('UPDATE users SET data = $1 WHERE id = $2', [JSON.stringify(userData), user.id]);
                     wasAnythingUpdated = true;
-                    console.log(`[Sync] Wyryto zmiany dla użytkownika ${user.id}. Zmiany zostaną zapisane.`);
+                    console.log(`[Sync] Wykryto zmiany dla użytkownika ${user.id}. Zmiany zostaną zapisane.`);
                 }
 
             } catch (error) {
