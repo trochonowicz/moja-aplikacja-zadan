@@ -1,4 +1,4 @@
-// server.js - Wersja z bazą danych PostgreSQL
+// server.js - Wersja z bazą danych PostgreSQL i rozszerzoną synchronizacją Google Calendar
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
@@ -7,6 +7,7 @@ const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const { google } = require('googleapis');
 const { Pool } = require('pg');
+const { v4: uuidv4 } = require('uuid'); // Do generowania unikalnych ID dla żądań konferencji
 
 // --- KONFIGURACJA ---
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -21,7 +22,7 @@ const pool = new Pool({
 });
 
 // ZMIENNA Z ID KALENDARZA
-const CALENDAR_ID = 'michal.trochonowicz@legarti.pl';
+const CALENDAR_ID = 'primary'; // Używamy kalendarza głównego użytkownika
 
 // --- MIDDLEWARE ---
 app.use(express.json());
@@ -45,7 +46,7 @@ passport.deserializeUser((user, done) => {
 passport.use(new GoogleStrategy({
     clientID: GOOGLE_CLIENT_ID,
     clientSecret: GOOGLE_CLIENT_SECRET,
-    callbackURL: "https://moja-aplikacja-zadan.onrender.com/auth/google/callback",
+    callbackURL: process.env.GOOGLE_CALLBACK_URL || "https://moja-aplikacja-zadan.onrender.com/auth/google/callback",
     scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events'],
     accessType: 'offline',
     prompt: 'consent'
@@ -85,6 +86,7 @@ passport.use(new GoogleStrategy({
 
         const user = {
             id: userId,
+            email: profile.emails[0].value,
             profile: profile,
             accessToken: accessToken,
             refreshToken: refreshToken
@@ -112,9 +114,13 @@ app.get('/auth/google/callback',
     }
 );
 
-app.get('/auth/logout', (req, res) => {
-    req.logout(() => { res.redirect('/'); });
+app.get('/auth/logout', (req, res, next) => {
+    req.logout((err) => {
+        if (err) { return next(err); }
+        res.redirect('/');
+    });
 });
+
 
 function isLoggedIn(req, res, next) {
     if (req.isAuthenticated()) {
@@ -123,7 +129,8 @@ function isLoggedIn(req, res, next) {
     res.status(401).json({ message: 'Brak autoryzacji' });
 }
 
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
+
 
 app.get('/api/auth/status', (req, res) => {
     if (req.isAuthenticated() && req.user && req.user.profile) {
@@ -133,6 +140,7 @@ app.get('/api/auth/status', (req, res) => {
         res.json({
             loggedIn: true,
             user: {
+                id: req.user.id,
                 displayName: req.user.profile.displayName || 'Brak nazwy',
                 email: email
             }
@@ -169,73 +177,136 @@ app.post('/api/data', isLoggedIn, async (req, res) => {
     }
 });
 
+// ZMODYFIKOWANY ENDPOINT /api/sync
 app.post('/api/sync', isLoggedIn, async (req, res) => {
     const { task } = req.body;
-    const { accessToken, refreshToken } = req.user;
-    if (!accessToken) {
-        return res.status(401).json({ message: 'Brak tokena dostępu do API Google.' });
-    }
-    const oauth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
-    oauth2Client.setCredentials({ access_token: accessToken, refresh_token: refreshToken });
-    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+    const userId = req.user.id;
+    const userEmail = req.user.email;
 
     try {
+        const dbResult = await pool.query('SELECT access_token, refresh_token FROM users WHERE id = $1', [userId]);
+        if (dbResult.rowCount === 0) {
+            return res.status(401).json({ message: 'Brak użytkownika w bazie.' });
+        }
+        const { access_token, refresh_token } = dbResult.rows[0];
+
+        if (!access_token) {
+            return res.status(401).json({ message: 'Brak tokena dostępu do API Google.' });
+        }
+
+        const oauth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
+        oauth2Client.setCredentials({ access_token, refresh_token });
+        
+        oauth2Client.on('tokens', async (tokens) => {
+            if (tokens.access_token) {
+                console.log(`[Sync] Odświeżono accessToken dla użytkownika ${userId}.`);
+                await pool.query('UPDATE users SET access_token = $1 WHERE id = $2', [tokens.access_token, userId]);
+            }
+        });
+
+        const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+        // Usunięcie wydarzenia
         if (task.googleCalendarEventId && !task.dueDate) {
-            await calendar.events.delete({ calendarId: CALENDAR_ID, eventId: task.googleCalendarEventId });
+            await calendar.events.delete({ calendarId: CALENDAR_ID, eventId: task.googleCalendarEventId, sendUpdates: 'all' });
             return res.json({ status: 'success', data: { action: 'deleted' } });
         }
+
+        // Brak daty = brak akcji
         if (!task.dueDate) {
             return res.json({ status: 'success', data: { action: 'none' } });
         }
-        let start, end;
-        const startDate = new Date(task.dueDate);
+
+        // Przygotowanie danych wydarzenia
         const eventTimeZone = 'Europe/Warsaw';
-        if (startDate.getUTCHours() === 0 && startDate.getUTCMinutes() === 0 && startDate.getUTCSeconds() === 0) {
+        const startDate = new Date(task.dueDate);
+        const isAllDay = startDate.getUTCHours() === 0 && startDate.getUTCMinutes() === 0 && startDate.getUTCSeconds() === 0;
+
+        let start, end;
+        if (isAllDay) {
             start = { date: startDate.toISOString().split('T')[0] };
             end = { date: new Date(startDate.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0] };
         } else {
+            const duration = task.duration || 60; // Domyślny czas trwania: 60 min
+            const endDate = new Date(startDate.getTime() + duration * 60 * 1000);
             start = { dateTime: startDate.toISOString(), timeZone: eventTimeZone };
-            end = { dateTime: new Date(startDate.getTime() + 60 * 60 * 1000).toISOString(), timeZone: eventTimeZone };
-        }
-        const eventData = { summary: task.text, description: task.notes || '', start, end };
-        
-        let syncResult;
-        if (task.googleCalendarEventId) {
-            syncResult = await calendar.events.update({ calendarId: CALENDAR_ID, eventId: task.googleCalendarEventId, resource: eventData });
-            console.log(`[Sync-Out] Zaktualizowano zadanie '${task.text}' w Google Calendar. EventId: ${task.googleCalendarEventId}`);
-        } else {
-            syncResult = await calendar.events.insert({ calendarId: CALENDAR_ID, resource: eventData });
-            console.log(`[Sync-Out] Utworzono nowe zadanie '${task.text}' w Google Calendar. EventId: ${syncResult.data.id}`);
+            end = { dateTime: endDate.toISOString(), timeZone: eventTimeZone };
         }
 
-        const userId = req.user.id;
+        const eventData = {
+            summary: task.text,
+            description: task.notes || '',
+            start,
+            end,
+            attendees: (task.attendees || []).map(email => ({ email })),
+            conferenceData: task.createMeetLink ? {
+                createRequest: {
+                    requestId: uuidv4(),
+                    conferenceSolutionKey: { type: 'hangoutsMeet' }
+                }
+            } : null,
+        };
+
+        let syncResult;
+        if (task.googleCalendarEventId) {
+            syncResult = await calendar.events.update({
+                calendarId: CALENDAR_ID,
+                eventId: task.googleCalendarEventId,
+                resource: eventData,
+                sendUpdates: 'all'
+            });
+            console.log(`[Sync-Out] Zaktualizowano zadanie '${task.text}' w Google Calendar. EventId: ${task.googleCalendarEventId}`);
+        } else {
+            syncResult = await calendar.events.insert({
+                calendarId: CALENDAR_ID,
+                resource: eventData,
+                conferenceDataVersion: 1,
+                sendUpdates: 'all'
+            });
+            console.log(`[Sync-Out] Utworzono nowe zadanie '${task.text}' w Google Calendar. EventId: ${syncResult.data.id}`);
+        }
+        
+        const updatedTaskData = {
+            googleCalendarEventId: syncResult.data.id,
+            meetLink: syncResult.data.hangoutLink || null
+        };
+
         const userDataResult = await pool.query('SELECT data FROM users WHERE id = $1', [userId]);
         if (userDataResult.rowCount > 0) {
             const userData = userDataResult.rows[0].data;
-            const listToUpdate = userData.lists.find(list => list.tasks.some(t => t.id === task.id));
-            if (listToUpdate) {
-                const taskToUpdate = listToUpdate.tasks.find(t => t.id === task.id);
+            for (const list of userData.lists) {
+                const taskToUpdate = list.tasks.find(t => t.id === task.id);
                 if (taskToUpdate) {
-                    taskToUpdate.googleCalendarEventId = syncResult.data.id;
-                    await pool.query('UPDATE users SET data = $1 WHERE id = $2', [JSON.stringify(userData), userId]);
-                    console.log(`[Sync-Out] Zaktualizowano googleCalendarEventId dla zadania '${taskToUpdate.text}' w bazie.`);
+                    taskToUpdate.googleCalendarEventId = updatedTaskData.googleCalendarEventId;
+                    taskToUpdate.meetLink = updatedTaskData.meetLink;
+                    break;
                 }
             }
+            await pool.query('UPDATE users SET data = $1 WHERE id = $2', [JSON.stringify(userData), userId]);
+            console.log(`[Sync-Out] Zaktualizowano dane zadania '${task.text}' w bazie.`);
         }
         
-        res.json({ status: 'success', data: { ...syncResult.data, action: task.googleCalendarEventId ? 'updated' : 'created' } });
+        res.json({ 
+            status: 'success', 
+            data: { 
+                ...syncResult.data, 
+                action: task.googleCalendarEventId ? 'updated' : 'created' 
+            }
+        });
+
     } catch (error) {
-        console.error('Błąd API Kalendarza Google:', error.message);
+        console.error('Błąd API Kalendarza Google:', error.response ? error.response.data : error.message);
         res.status(500).json({ message: `Błąd API Kalendarza Google: ${error.message}` });
     }
 });
 
+
+// ZMODYFIKOWANA FUNKCJA runPeriodicSync
 async function runPeriodicSync() {
     console.log("[Sync] Uruchamiam okresową synchronizację...");
     try {
         const dbResult = await pool.query('SELECT id, data, access_token, refresh_token FROM users');
         const users = dbResult.rows;
-        let wasAnythingUpdated = false;
 
         for (const user of users) {
             if (!user.refresh_token) {
@@ -244,12 +315,8 @@ async function runPeriodicSync() {
             }
 
             console.log(`[Sync] Rozpoczynam synchronizację dla użytkownika: ${user.id}`);
-
             const oauth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
-            oauth2Client.setCredentials({
-                access_token: user.access_token,
-                refresh_token: user.refresh_token
-            });
+            oauth2Client.setCredentials({ access_token: user.access_token, refresh_token: user.refresh_token });
 
             oauth2Client.on('tokens', async (tokens) => {
                 if (tokens.access_token) {
@@ -259,15 +326,9 @@ async function runPeriodicSync() {
             });
 
             const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-
             const timeMin = new Date();
-            timeMin.setDate(timeMin.getDate() - 30);
-            const params = {
-                calendarId: CALENDAR_ID,
-                timeMin: timeMin.toISOString(),
-                showDeleted: true,
-                singleEvents: true
-            };
+            timeMin.setDate(timeMin.getDate() - 30); 
+            const params = { calendarId: CALENDAR_ID, timeMin: timeMin.toISOString(), showDeleted: true, singleEvents: true };
 
             try {
                 const response = await calendar.events.list(params);
@@ -275,88 +336,80 @@ async function runPeriodicSync() {
                 const userData = user.data;
                 let wasUserUpdated = false;
 
-                console.log(`[Sync-In] Pobranych zdarzeń z Google: ${googleEvents.length}`);
-                if (googleEvents.length > 0) {
-                    googleEvents.forEach(event => {
-                        console.log(`[Sync-In] Zdarzenie z Google: ID=${event.id}, Tytuł='${event.summary}', Status=${event.status}, Data=${event.start.dateTime || event.start.date}`);
-                    });
-                }
-                
+                const allTasks = userData.lists.flatMap(list => list.tasks);
+
                 for (const event of googleEvents) {
                     const eventId = event.id;
-                    let taskToUpdate = null;
-                    for (const list of userData.lists) {
-                        const foundTask = list.tasks.find(t => t.googleCalendarEventId === eventId);
-                        if (foundTask) {
-                            taskToUpdate = foundTask;
-                            break;
-                        }
-                    }
+                    const taskToUpdate = allTasks.find(t => t.googleCalendarEventId === eventId);
 
                     if (taskToUpdate) {
+                        let isChanged = false;
                         if (event.status === 'cancelled') {
                             console.log(`[Sync-In] Zadanie "${taskToUpdate.text}" usunięto z kalendarza.`);
                             taskToUpdate.googleCalendarEventId = null;
-                            wasUserUpdated = true;
+                            taskToUpdate.meetLink = null;
+                            isChanged = true;
                         } else {
                             const newDueDateISO = event.start.dateTime || `${event.start.date}T00:00:00.000Z`;
-                            const oldDateValue = taskToUpdate.dueDate ? new Date(taskToUpdate.dueDate).getTime() : null;
-                            const newDateValue = new Date(newDueDateISO).getTime();
-
-                            if (oldDateValue !== newDateValue || taskToUpdate.text !== event.summary) {
-                                console.log(`[Sync-In] Aktualizuję zadanie "${taskToUpdate.text}". Nowa data: ${newDueDateISO}`);
-                                taskToUpdate.dueDate = newDueDateISO;
-                                taskToUpdate.text = event.summary || taskToUpdate.text;
-                                wasUserUpdated = true;
+                            const newAttendees = (event.attendees || []).map(a => a.email);
+                            
+                            if (new Date(taskToUpdate.dueDate).getTime() !== new Date(newDueDateISO).getTime()) {
+                                taskToUpdate.dueDate = newDueDateISO; isChanged = true;
+                            }
+                            if (taskToUpdate.text !== (event.summary || taskToUpdate.text)) {
+                                taskToUpdate.text = event.summary; isChanged = true;
+                            }
+                            if (taskToUpdate.meetLink !== (event.hangoutLink || null)) {
+                                taskToUpdate.meetLink = event.hangoutLink || null; isChanged = true;
+                            }
+                            if (JSON.stringify(taskToUpdate.attendees || []) !== JSON.stringify(newAttendees)) {
+                                taskToUpdate.attendees = newAttendees; isChanged = true;
                             }
                         }
+                        if (isChanged) wasUserUpdated = true;
                     }
                 }
 
                 if (wasUserUpdated) {
                     await pool.query('UPDATE users SET data = $1 WHERE id = $2', [JSON.stringify(userData), user.id]);
-                    wasAnythingUpdated = true;
-                    console.log(`[Sync] Wykryto zmiany dla użytkownika ${user.id}. Zmiany zostaną zapisane.`);
+                    console.log(`[Sync] Wykryto zmiany dla użytkownika ${user.id}. Zmiany zostały zapisane.`);
+                } else {
+                    console.log(`[Sync] Brak zmian do zapisania dla użytkownika ${user.id}.`);
                 }
 
             } catch (error) {
                 if (error.response && error.response.data && error.response.data.error === 'invalid_grant') {
                     console.error(`[Sync] Błąd autoryzacji dla ${user.id}. Token odświeżający jest nieprawidłowy.`);
-                    await pool.query('UPDATE users SET refresh_token = NULL, access_token = NULL, sync_token = NULL WHERE id = $1', [user.id]);
+                    await pool.query('UPDATE users SET refresh_token = NULL, access_token = NULL WHERE id = $1', [user.id]);
                 } else {
                     console.error(`[Sync] Błąd API Kalendarza dla użytkownika ${user.id}:`, error.message);
                 }
             }
         }
-
-        if (wasAnythingUpdated) {
-            console.log("[Sync] Zmiany zostały zapisane w bazie danych.");
-        } else {
-            console.log("[Sync] Brak zmian do zapisania.");
-        }
+        console.log("[Sync] Synchronizacja zakończona.");
     } catch (error) {
         console.error('[Sync] Wystąpił błąd podczas cyklicznej synchronizacji:', error);
     }
 }
 
+
 // --- URUCHOMIENIE SERWERA ---
 app.listen(PORT, async () => {
-    console.log(`Serwer działa na http://localhost:${PORT}`);
+    console.log(`Serwer działa na porcie ${PORT}`);
     try {
         await pool.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id VARCHAR(255) PRIMARY KEY,
                 data JSONB NOT NULL,
-                access_token VARCHAR(255),
-                refresh_token VARCHAR(255),
-                sync_token VARCHAR(255)
+                access_token TEXT,
+                refresh_token TEXT
             );
         `);
         console.log("Tabela 'users' sprawdzona/utworzona pomyślnie.");
     } catch (err) {
         console.error("Błąd podczas tworzenia tabeli 'users':", err);
     }
-    const SYNC_INTERVAL_MS = 60 * 1000; // 1 minuta
+    const SYNC_INTERVAL_MS = 2 * 60 * 1000; // 2 minuty
     setTimeout(runPeriodicSync, 5000);
     setInterval(runPeriodicSync, SYNC_INTERVAL_MS);
 });
