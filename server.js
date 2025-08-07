@@ -21,6 +21,7 @@ const pool = new Pool({
 });
 
 // ZMIENNA Z ID KALENDARZA
+// PRAWIDŁOWY IDENTYFIKATOR KALENDARZA Z TWOICH USTAWIEŃ
 const CALENDAR_ID = 'michal.trochonowicz@legarti.pl';
 
 // --- MIDDLEWARE ---
@@ -50,6 +51,7 @@ passport.use(new GoogleStrategy({
     accessType: 'offline',
     prompt: 'consent'
 }, async (accessToken, refreshToken, profile, done) => {
+    // === Logowanie do diagnozy ===
     console.log("--- Logowanie z GoogleStrategy ---");
     console.log("Profile ID:", profile.id);
     console.log("Access Token:", accessToken ? "Otrzymano" : "Brak");
@@ -279,10 +281,6 @@ async function runPeriodicSync() {
                 if (googleEvents.length > 0) {
                     googleEvents.forEach(event => {
                         console.log(`[Sync-In] Zdarzenie z Google: ID=${event.id}, Tytuł='${event.summary}', Status=${event.status}, Data=${event.start.dateTime || event.start.date}`);
-                        // Sprawdzamy, czy w pobranych danych jest ID nowo utworzonego zadania.
-                        if (event.id === '7m0nn3i1p5no2ln8u0ob09pi4c') {
-                            console.log(`[Sync-In] ZNALEZIONO pasujące zadanie: ID=${event.id}, Tytuł='${event.summary}'`);
-                        }
                     });
                 }
                 
