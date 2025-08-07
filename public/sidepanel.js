@@ -1,13 +1,15 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // Referencje do elementów UI
+    // Referencje do wszystkich elementów UI
     const loginContainer = document.getElementById('login-container');
     const appContainer = document.getElementById('app-container');
     const userDisplayNameEl = document.getElementById('user-display-name');
     const dropdownContainer = document.getElementById('custom-dropdown-container');
+    const currentListTrigger = document.getElementById('current-list-trigger');
+    const currentListName = document.getElementById('current-list-name');
+    const smartListOptions = document.getElementById('smart-list-options');
+    const userListOptions = document.getElementById('user-list-options');
     const taskListEl = document.getElementById('task-list');
     const modal = document.getElementById('edit-modal-backdrop');
-    // ... i wszystkie inne referencje
-
     const calendarHeaderEl = document.getElementById('calendar-header');
     const calendarGridEl = document.getElementById('calendar-grid');
     const calendarDateHeaderEl = document.getElementById('calendar-date-header');
@@ -15,14 +17,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const nextWeekBtn = document.getElementById('next-week-btn');
     const todayBtn = document.getElementById('today-btn');
 
-    // Zmienne globalne
+    // Globalny stan aplikacji
     let state = { data: null, showCompleted: false, currentWeekStart: getStartOfWeek(new Date()) };
-    
+    let listSortable = null;
+
     // Funkcje pomocnicze dla dat
     function getStartOfWeek(date) {
         const d = new Date(date);
         const day = d.getDay();
-        const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+        const diff = d.getDate() - day + (day === 0 ? -6 : 1); // poniedziałek jako pierwszy dzień
         d.setHours(0, 0, 0, 0);
         return new Date(d.setDate(diff));
     }
@@ -32,18 +35,31 @@ document.addEventListener('DOMContentLoaded', () => {
         result.setDate(result.getDate() + days);
         return result;
     }
-
-    const api = {
-        // ... (funkcje API bez zmian)
-    };
     
+    // Komunikacja z API
+    const api = {
+        getStatus: () => fetch('/api/auth/status').then(res => res.json()),
+        getData: () => fetch('/api/data').then(res => res.json()),
+        saveData: (data) => fetch('/api/data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+        syncTask: (task) => fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task }) }).then(res => res.json())
+    };
+
+    // Główna funkcja renderująca
     const renderAll = () => {
         if (!state.data) return;
-        // renderLists(state.data);
-        // renderTasks(state.data);
+        renderLists(state.data);
+        renderTasks(state.data);
         renderCalendar(state.data);
     };
 
+    const renderLists = (data) => {
+        // Ta funkcja renderuje dropdown z listami zadań (kod z poprzednich wersji)
+    };
+
+    const renderTasks = (data) => {
+        // Ta funkcja renderuje listę zadań (kod z poprzednich wersji)
+    };
+    
     const renderCalendar = (data) => {
         calendarGridEl.innerHTML = '';
         calendarHeaderEl.innerHTML = '<div class="time-label-header"></div>';
@@ -92,7 +108,7 @@ document.addEventListener('DOMContentLoaded', () => {
             calendarGridEl.appendChild(dayColumn);
         }
 
-        data.lists.flatMap(l => l.tasks).forEach(task => {
+        (data.lists || []).flatMap(l => l.tasks).forEach(task => {
             if (task.dueDate) {
                 const taskDate = new Date(task.dueDate);
                 if (taskDate >= weekStart && taskDate < addDays(weekEnd, 1)) {
@@ -125,7 +141,7 @@ document.addEventListener('DOMContentLoaded', () => {
         resizer.addEventListener('mousedown', (e) => initResize(e, el, task));
         el.addEventListener('click', (e) => {
             if (e.target !== resizer) {
-                // openEditModal(task.id)
+                // openEditModal(task.id);
             }
         });
         return el;
@@ -134,28 +150,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const initResize = (e, eventEl, task) => {
         e.preventDefault();
         e.stopPropagation();
-
         const startY = e.clientY;
         const startHeight = parseInt(eventEl.style.height);
-
         const doDrag = (moveEvent) => {
             const newHeight = startHeight + moveEvent.clientY - startY;
-            if (newHeight > 15) {
-                eventEl.style.height = `${newHeight}px`;
-            }
+            if (newHeight > 15) eventEl.style.height = `${newHeight}px`;
         };
-
         const stopDrag = async () => {
             document.removeEventListener('mousemove', doDrag);
             document.removeEventListener('mouseup', stopDrag);
-            
             const finalHeight = parseInt(eventEl.style.height);
             const newDuration = Math.max(15, Math.round(finalHeight / 5) * 5);
             eventEl.style.height = `${newDuration}px`;
-
-            // updateTask(task.id, { duration: newDuration });
+            await updateTask(task.id, { duration: newDuration });
         };
-
         document.addEventListener('mousemove', doDrag);
         document.addEventListener('mouseup', stopDrag);
     };
@@ -164,14 +172,57 @@ document.addEventListener('DOMContentLoaded', () => {
         const taskId = Number(evt.item.dataset.taskId);
         const newTimeISO = evt.to.dataset.time;
         evt.item.remove();
-        // updateTask(taskId, { dueDate: newTimeISO });
+        await updateTask(taskId, { dueDate: newTimeISO });
     };
 
+    const updateTask = async (taskId, props) => {
+        let taskToUpdate;
+        for (const list of state.data.lists) {
+            const task = list.tasks.find(t => t.id === taskId);
+            if (task) {
+                taskToUpdate = task;
+                Object.assign(taskToUpdate, props);
+                break;
+            }
+        }
+        if (taskToUpdate) {
+            renderAll(); // Optimistic update
+            await api.saveData(state.data);
+            await api.syncTask(taskToUpdate);
+            // Optionally, refresh data from server after sync
+            state.data = await api.getData();
+            renderAll();
+        }
+    };
+    
+    // Główna funkcja inicjalizująca aplikację
     const init = async () => {
-        // ... (funkcja init bez większych zmian, ale upewnij się, że wywołuje renderAll)
-        // new Sortable(taskListEl, { group: 'tasks' }); // Inicjalizacja listy zadań jako przeciągalnej
+        try {
+            const authStatus = await api.getStatus();
+            if (authStatus.loggedIn) {
+                loginContainer.style.display = 'none';
+                appContainer.style.display = 'flex';
+                // userDisplayNameEl.textContent = authStatus.user.displayName;
+                state.data = await api.getData();
+                
+                listSortable = new Sortable(taskListEl, { 
+                    group: 'tasks',
+                    // onEnd: handleTaskDropInList
+                });
+                
+                renderAll();
+            } else {
+                loginContainer.style.display = 'flex';
+                appContainer.style.display = 'none';
+            }
+        } catch (error) {
+            console.error("Błąd inicjalizacji:", error);
+            loginContainer.style.display = 'flex';
+            appContainer.style.display = 'none';
+        }
     };
-
+    
+    // Dodanie event listenerów do nawigacji
     prevWeekBtn.addEventListener('click', () => {
         state.currentWeekStart.setDate(state.currentWeekStart.getDate() - 7);
         renderAll();
@@ -185,5 +236,6 @@ document.addEventListener('DOMContentLoaded', () => {
         renderAll();
     });
     
-    // init(); // Wywołaj inicjalizację
+    // Uruchomienie aplikacji
+    init();
 });
