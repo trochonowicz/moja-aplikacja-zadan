@@ -52,7 +52,7 @@ passport.use(new GoogleStrategy({
 
         // Sprawdź, czy użytkownik istnieje
         let result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
-        
+
         if (result.rowCount === 0) {
             // Użytkownik nie istnieje, stwórz nowego
             const initialUserData = {
@@ -65,10 +65,15 @@ passport.use(new GoogleStrategy({
                 [userId, userDataString, accessToken, refreshToken]);
         } else {
             // Użytkownik istnieje, zaktualizuj tokeny
-            await pool.query('UPDATE users SET access_token = $1, refresh_token = $2 WHERE id = $3', 
-                [accessToken, refreshToken, userId]);
+            if (refreshToken) {
+                await pool.query('UPDATE users SET access_token = $1, refresh_token = $2 WHERE id = $3', 
+                    [accessToken, refreshToken, userId]);
+            } else {
+                await pool.query('UPDATE users SET access_token = $1 WHERE id = $2', 
+                    [accessToken, userId]);
+            }
         }
-
+        
         const user = {
             id: userId,
             profile: profile,
@@ -85,8 +90,6 @@ passport.use(new GoogleStrategy({
 
 // --- ENDPOINTY ---
 app.get('/auth/google', (req, res) => {
-    const protocol = req.protocol;
-    const host = req.get('host');
     const redirect_uri = 'https://moja-aplikacja-zadan.onrender.com/auth/google/callback';
     const params = new URLSearchParams({
         client_id: process.env.GOOGLE_CLIENT_ID,
