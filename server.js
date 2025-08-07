@@ -196,13 +196,33 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
             end = { dateTime: new Date(startDate.getTime() + 60 * 60 * 1000).toISOString(), timeZone: eventTimeZone };
         }
         const eventData = { summary: task.text, description: task.notes || '', start, end };
+        
+        let syncResult;
         if (task.googleCalendarEventId) {
-            const updatedEvent = await calendar.events.update({ calendarId: 'primary', eventId: task.googleCalendarEventId, resource: eventData });
-            res.json({ status: 'success', data: { ...updatedEvent.data, action: 'updated' } });
+            syncResult = await calendar.events.update({ calendarId: 'primary', eventId: task.googleCalendarEventId, resource: eventData });
+            console.log(`[Sync-Out] Zaktualizowano zadanie '${task.text}' w Google Calendar. EventId: ${task.googleCalendarEventId}`);
         } else {
-            const newEvent = await calendar.events.insert({ calendarId: 'primary', resource: eventData });
-            res.json({ status: 'success', data: { ...newEvent.data, action: 'created' } });
+            syncResult = await calendar.events.insert({ calendarId: 'primary', resource: eventData });
+            console.log(`[Sync-Out] Utworzono nowe zadanie '${task.text}' w Google Calendar. EventId: ${syncResult.data.id}`);
         }
+
+        // Dodano logikę do aktualizacji bazy danych z eventId
+        const userId = req.user.id;
+        const userDataResult = await pool.query('SELECT data FROM users WHERE id = $1', [userId]);
+        if (userDataResult.rowCount > 0) {
+            const userData = userDataResult.rows[0].data;
+            const listToUpdate = userData.lists.find(list => list.tasks.some(t => t.id === task.id));
+            if (listToUpdate) {
+                const taskToUpdate = listToUpdate.tasks.find(t => t.id === task.id);
+                if (taskToUpdate) {
+                    taskToUpdate.googleCalendarEventId = syncResult.data.id;
+                    await pool.query('UPDATE users SET data = $1 WHERE id = $2', [JSON.stringify(userData), userId]);
+                    console.log(`[Sync-Out] Zaktualizowano googleCalendarEventId dla zadania '${taskToUpdate.text}' w bazie.`);
+                }
+            }
+        }
+        
+        res.json({ status: 'success', data: { ...syncResult.data, action: task.googleCalendarEventId ? 'updated' : 'created' } });
     } catch (error) {
         console.error('Błąd API Kalendarza Google:', error.message);
         res.status(500).json({ message: `Błąd API Kalendarza Google: ${error.message}` });
@@ -212,7 +232,6 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
 async function runPeriodicSync() {
     console.log("[Sync] Uruchamiam okresową synchronizację...");
     try {
-        // Zawsze pobieramy refresh_token z bazy, ale sync_token nie jest już potrzebny
         const dbResult = await pool.query('SELECT id, data, access_token, refresh_token FROM users');
         const users = dbResult.rows;
         let wasAnythingUpdated = false;
@@ -240,7 +259,6 @@ async function runPeriodicSync() {
 
             const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
-            // Uproszczona logika synchronizacji. Zawsze pobiera wydarzenia z ostatnich 30 dni.
             const timeMin = new Date();
             timeMin.setDate(timeMin.getDate() - 30);
             const params = {
@@ -256,7 +274,6 @@ async function runPeriodicSync() {
                 const userData = user.data;
                 let wasUserUpdated = false;
 
-                // Iteracja przez wydarzenia z Google Calendar
                 for (const event of googleEvents) {
                     const eventId = event.id;
                     let taskToUpdate = null;
@@ -270,7 +287,7 @@ async function runPeriodicSync() {
 
                     if (taskToUpdate) {
                         if (event.status === 'cancelled') {
-                            console.log(`[Sync] Zadanie "${taskToUpdate.text}" usunięto z kalendarza.`);
+                            console.log(`[Sync-In] Zadanie "${taskToUpdate.text}" usunięto z kalendarza.`);
                             taskToUpdate.googleCalendarEventId = null;
                             wasUserUpdated = true;
                         } else {
@@ -279,7 +296,7 @@ async function runPeriodicSync() {
                             const newDateValue = new Date(newDueDateISO).getTime();
 
                             if (oldDateValue !== newDateValue || taskToUpdate.text !== event.summary) {
-                                console.log(`[Sync] Aktualizuję zadanie "${taskToUpdate.text}". Nowa data: ${newDueDateISO}`);
+                                console.log(`[Sync-In] Aktualizuję zadanie "${taskToUpdate.text}". Nowa data: ${newDueDateISO}`);
                                 taskToUpdate.dueDate = newDueDateISO;
                                 taskToUpdate.text = event.summary || taskToUpdate.text;
                                 wasUserUpdated = true;
