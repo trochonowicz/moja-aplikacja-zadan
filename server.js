@@ -53,7 +53,7 @@ passport.use(new GoogleStrategy({
     console.log("Access Token:", accessToken ? "Otrzymano" : "Brak");
     console.log("Refresh Token:", refreshToken ? "Otrzymano" : "Brak");
     console.log("---------------------------------");
-    
+
     try {
         const userId = profile.id;
 
@@ -66,21 +66,21 @@ passport.use(new GoogleStrategy({
             };
             const userDataString = JSON.stringify(initialUserData);
 
-            await pool.query('INSERT INTO users (id, data, access_token, refresh_token) VALUES ($1, $2, $3, $4)', 
+            await pool.query('INSERT INTO users (id, data, access_token, refresh_token) VALUES ($1, $2, $3, $4)',
                 [userId, userDataString, accessToken, refreshToken]);
             console.log(`[Auth] Nowy użytkownik ${userId} zapisany.`);
         } else {
             if (refreshToken) {
-                await pool.query('UPDATE users SET access_token = $1, refresh_token = $2 WHERE id = $3', 
+                await pool.query('UPDATE users SET access_token = $1, refresh_token = $2 WHERE id = $3',
                     [accessToken, refreshToken, userId]);
                 console.log(`[Auth] Zaktualizowano tokeny dla użytkownika ${userId}. Zapisano refreshToken.`);
             } else {
-                await pool.query('UPDATE users SET access_token = $1 WHERE id = $2', 
+                await pool.query('UPDATE users SET access_token = $1 WHERE id = $2',
                     [accessToken, userId]);
                 console.log(`[Auth] Zaktualizowano accessToken dla użytkownika ${userId}.`);
             }
         }
-        
+
         const user = {
             id: userId,
             profile: profile,
@@ -176,8 +176,7 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
     const oauth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
     oauth2Client.setCredentials({ access_token: accessToken, refresh_token: refreshToken });
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-    
-    // ... reszta kodu z oryginalnej funkcji app.post('/api/sync') pozostaje bez zmian
+
     try {
         if (task.googleCalendarEventId && !task.dueDate) {
             await calendar.events.delete({ calendarId: 'primary', eventId: task.googleCalendarEventId });
@@ -213,7 +212,8 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
 async function runPeriodicSync() {
     console.log("[Sync] Uruchamiam okresową synchronizację...");
     try {
-        const dbResult = await pool.query('SELECT id, data, access_token, refresh_token, sync_token FROM users');
+        // Zawsze pobieramy refresh_token z bazy, ale sync_token nie jest już potrzebny
+        const dbResult = await pool.query('SELECT id, data, access_token, refresh_token FROM users');
         const users = dbResult.rows;
         let wasAnythingUpdated = false;
 
@@ -224,13 +224,13 @@ async function runPeriodicSync() {
             }
 
             console.log(`[Sync] Rozpoczynam synchronizację dla użytkownika: ${user.id}`);
-            
+
             const oauth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
             oauth2Client.setCredentials({
                 access_token: user.access_token,
                 refresh_token: user.refresh_token
             });
-            
+
             oauth2Client.on('tokens', async (tokens) => {
                 if (tokens.access_token) {
                     console.log(`[Sync] Odświeżono accessToken dla użytkownika ${user.id}.`);
@@ -239,32 +239,24 @@ async function runPeriodicSync() {
             });
 
             const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-            
-            let params;
-            if (user.sync_token) {
-                params = { calendarId: 'primary', syncToken: user.sync_token };
-            } else {
-                const timeMin = new Date();
-                timeMin.setDate(timeMin.getDate() - 30);
-                params = {
-                    calendarId: 'primary',
-                    timeMin: timeMin.toISOString(),
-                    showDeleted: true,
-                    singleEvents: true
-                };
-            }
+
+            // Uproszczona logika synchronizacji. Zawsze pobiera wydarzenia z ostatnich 30 dni.
+            const timeMin = new Date();
+            timeMin.setDate(timeMin.getDate() - 30);
+            const params = {
+                calendarId: 'primary',
+                timeMin: timeMin.toISOString(),
+                showDeleted: true,
+                singleEvents: true
+            };
 
             try {
                 const response = await calendar.events.list(params);
                 const googleEvents = response.data.items;
                 const userData = user.data;
                 let wasUserUpdated = false;
-                
-                if (response.data.nextSyncToken) {
-                    await pool.query('UPDATE users SET sync_token = $1 WHERE id = $2', [response.data.nextSyncToken, user.id]);
-                    wasUserUpdated = true;
-                }
 
+                // Iteracja przez wydarzenia z Google Calendar
                 for (const event of googleEvents) {
                     const eventId = event.id;
                     let taskToUpdate = null;
@@ -295,7 +287,7 @@ async function runPeriodicSync() {
                         }
                     }
                 }
-                
+
                 if (wasUserUpdated) {
                     await pool.query('UPDATE users SET data = $1 WHERE id = $2', [JSON.stringify(userData), user.id]);
                     wasAnythingUpdated = true;
@@ -303,11 +295,6 @@ async function runPeriodicSync() {
                 }
 
             } catch (error) {
-                if (error.code === 410) {
-                    console.log(`[Sync] SyncToken dla użytkownika ${user.id} wygasł. Rozpoczynam pełną synchronizację.`);
-                    await pool.query('UPDATE users SET sync_token = NULL WHERE id = $1', [user.id]);
-                    // Możesz tu zaimplementować pełną resynchronizację lub zignorować i poczekać na kolejny cykl.
-                }
                 if (error.response && error.response.data && error.response.data.error === 'invalid_grant') {
                     console.error(`[Sync] Błąd autoryzacji dla ${user.id}. Token odświeżający jest nieprawidłowy.`);
                     await pool.query('UPDATE users SET refresh_token = NULL, access_token = NULL, sync_token = NULL WHERE id = $1', [user.id]);
@@ -316,7 +303,7 @@ async function runPeriodicSync() {
                 }
             }
         }
-        
+
         if (wasAnythingUpdated) {
             console.log("[Sync] Zmiany zostały zapisane w bazie danych.");
         } else {
