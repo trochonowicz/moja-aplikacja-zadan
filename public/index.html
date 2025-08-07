@@ -43,6 +43,11 @@
                     </div>
                 </div>
                  <div class="header-actions">
+                    <div class="calendar-nav">
+                        <button id="prev-day-btn" title="Poprzedni dzień">&lt;</button>
+                        <h2 id="calendar-date-header">Dzisiaj</h2>
+                        <button id="next-day-btn" title="Następny dzień">&gt;</button>
+                    </div>
                     <div id="sort-dropdown-container" class="custom-dropdown-container">
                         <button id="sort-trigger-btn" class="icon-btn" title="Zmień sortowanie"></button>
                         <div id="sort-options-dropdown" class="list-dropdown">
@@ -55,11 +60,6 @@
                     </div>
                     <button id="toggle-completed-btn" class="icon-btn" title="Pokaż ukończone"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v-6M6 20V10M18 20V4"/></svg></button>
                 </div>
-            </div>
-             <div class="calendar-nav">
-                <button id="prev-day-btn">&lt;</button>
-                <h2 id="calendar-date-header">Dzisiaj</h2>
-                <button id="next-day-btn">&gt;</button>
             </div>
         </header>
 
@@ -118,7 +118,7 @@
                 <label for="edit-task-priority">Priorytet</label>
                 <select id="edit-task-priority"><option value="low">Niski</option><option value="medium">Średni</option><option value="high">Wysoki</option></select>
                 
-                <label for="edit-task-attendees">Zaproś gości (oddziel e-maile przecinkiem)</label>
+                <label for="edit-task-attendees">Zaproś gości (e-maile oddzielone przecinkiem)</label>
                 <input type="text" id="edit-task-attendees" placeholder="email1@example.com, email2@example.com...">
                 
                 <div class="checkbox-wrapper">
