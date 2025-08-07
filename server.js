@@ -87,7 +87,7 @@ passport.use(new GoogleStrategy({
 app.get('/auth/google', (req, res) => {
     const protocol = req.protocol;
     const host = req.get('host');
-    const redirect_uri = `${protocol}://${host}/auth/google/callback`;
+    const redirect_uri = 'https://moja-aplikacja-zadan.onrender.com/auth/google/callback';
     const params = new URLSearchParams({
         client_id: process.env.GOOGLE_CLIENT_ID,
         redirect_uri: redirect_uri,
