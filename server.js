@@ -22,7 +22,6 @@ const pool = new Pool({
 });
 
 // --- MIDDLEWARE ---
-app.use(express.static('public'));
 app.use(express.json());
 app.use(session({
     secret: process.env.SESSION_SECRET,
@@ -44,17 +43,16 @@ passport.deserializeUser((user, done) => {
 passport.use(new GoogleStrategy({
     clientID: GOOGLE_CLIENT_ID,
     clientSecret: GOOGLE_CLIENT_SECRET,
-    callbackURL: "/auth/google/callback",
+    // POPRAWIONY: Zmieniono na pełny adres URL
+    callbackURL: "https://moja-aplikacja-zadan.onrender.com/auth/google/callback",
     scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events']
 }, async (accessToken, refreshToken, profile, done) => {
     try {
         const userId = profile.id;
 
-        // Sprawdź, czy użytkownik istnieje
         let result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
 
         if (result.rowCount === 0) {
-            // Użytkownik nie istnieje, stwórz nowego
             const initialUserData = {
                 lists: [{ id: Date.now(), name: "Moje Zadania", tasks: [], sortMode: "manual" }],
                 activeListId: "today"
@@ -64,7 +62,6 @@ passport.use(new GoogleStrategy({
             await pool.query('INSERT INTO users (id, data, access_token, refresh_token) VALUES ($1, $2, $3, $4)', 
                 [userId, userDataString, accessToken, refreshToken]);
         } else {
-            // Użytkownik istnieje, zaktualizuj tokeny
             if (refreshToken) {
                 await pool.query('UPDATE users SET access_token = $1, refresh_token = $2 WHERE id = $3', 
                     [accessToken, refreshToken, userId]);
@@ -89,18 +86,10 @@ passport.use(new GoogleStrategy({
 }));
 
 // --- ENDPOINTY ---
-app.get('/auth/google', (req, res) => {
-    const redirect_uri = 'https://moja-aplikacja-zadan.onrender.com/auth/google/callback';
-    const params = new URLSearchParams({
-        client_id: process.env.GOOGLE_CLIENT_ID,
-        redirect_uri: redirect_uri,
-        response_type: 'code',
-        scope: 'profile email https://www.googleapis.com/auth/calendar.events',
-        access_type: 'offline',
-        prompt: 'consent'
-    });
-    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-    res.redirect(authUrl);
+app.get('/auth/google', (req, res, next) => {
+    passport.authenticate('google', {
+        scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events']
+    })(req, res, next);
 });
 
 app.get('/auth/google/callback',
@@ -120,6 +109,9 @@ function isLoggedIn(req, res, next) {
     }
     res.status(401).json({ message: 'Brak autoryzacji' });
 }
+
+// Użycie app.use() na górze pliku, aby poprawnie serwować pliki statyczne
+app.use(express.static('public'));
 
 app.get('/api/auth/status', (req, res) => {
     if (req.isAuthenticated() && req.user && req.user.profile) {
