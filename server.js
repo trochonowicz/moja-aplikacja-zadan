@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const session = require('express-session');
+const pgSessionFactory = require('connect-pg-simple');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const { google } = require('googleapis');
@@ -12,30 +13,40 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_PROD = process.env.NODE_ENV === 'production';
 
-// ====== Baza danych (Render PostgreSQL wymaga SSL) ======
+// ====== Baza danych ======
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// ====== Middleware ======
-app.set('trust proxy', 1); // ważne za proxy (Render)
+// ====== Session store w Postgres ======
+const PgSession = pgSessionFactory(session);
+const sessionStore = new PgSession({
+  pool,
+  tableName: 'user_sessions',
+  createTableIfMissing: true
+});
+
+app.set('trust proxy', 1);
 app.use(express.json());
+
 app.use(session({
+  store: sessionStore,
   secret: process.env.SESSION_SECRET || 'change-me',
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: IS_PROD,                 // HTTPS na Renderze => true
+    secure: IS_PROD,                         // na Render HTTPS
     httpOnly: true,
-    sameSite: IS_PROD ? 'none' : 'lax', // 'none' eliminuje problemy z powrotem z Google
+    sameSite: IS_PROD ? 'none' : 'lax',      // Google OAuth wymaga 'none' przy przekierowaniu
     maxAge: 30 * 24 * 60 * 60 * 1000
   }
 }));
+
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Serwujemy pliki z katalogu projektu (index.html, css, js)
+// Statyki (index.html, css, js)
 app.use(express.static(path.join(__dirname)));
 
 // ====== Passport + Google OAuth ======
@@ -81,7 +92,6 @@ function isLoggedIn(req, res, next) {
   res.status(401).send('Not authenticated');
 }
 
-// ====== Auth routes ======
 app.get('/auth/google', passport.authenticate('google', {
   scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events'],
   accessType: 'offline',
@@ -91,7 +101,6 @@ app.get('/auth/google', passport.authenticate('google', {
 app.get('/auth/google/callback',
   passport.authenticate('google', { failureRedirect: '/' }),
   (req, res) => {
-    // Upewnij się, że sesja jest zapisana zanim zrobimy redirect
     req.session.save(() => res.redirect('/'));
   }
 );
@@ -186,12 +195,11 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
   }
 });
 
-// ====== SPA catch-all ======
+// SPA catch-all
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// ====== Start ======
 app.listen(PORT, async () => {
   console.log(`Serwer działa na porcie ${PORT}`);
   try {
@@ -205,7 +213,9 @@ app.listen(PORT, async () => {
       );
     `);
     console.log("Tabela 'users' gotowa.");
+
+    // connect-pg-simple utworzy tabelę sesji automatycznie (createTableIfMissing)
   } catch (err) {
-    console.error("Błąd przy tworzeniu tabeli 'users':", err);
+    console.error("Błąd przy inicjalizacji bazy:", err);
   }
 });
