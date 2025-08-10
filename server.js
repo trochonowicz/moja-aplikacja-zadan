@@ -12,7 +12,6 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_PROD = process.env.NODE_ENV === 'production';
-const PROD_DOMAIN = 'moja-aplikacja-zadan.onrender.com';
 
 // ====== DB ======
 const pool = new Pool({
@@ -32,13 +31,12 @@ app.set('trust proxy', 1);
 app.use(express.json());
 
 const cookieOptions = {
-  secure: IS_PROD,                  // https only in prod
+  secure: IS_PROD,
   httpOnly: true,
-  sameSite: IS_PROD ? 'lax' : 'lax', // top-level GET nav from Google is OK with LAX
+  sameSite: 'lax',     // top-level redirect z Google działa przy LAX
   maxAge: 30 * 24 * 60 * 60 * 1000,
   path: '/'
 };
-if (IS_PROD) cookieOptions.domain = PROD_DOMAIN; // przypnij cookie do produkcyjnej domeny
 
 app.use(session({
   name: 'sid',
@@ -49,27 +47,21 @@ app.use(session({
   cookie: cookieOptions
 }));
 
-// debug middleware (loguj ID sesji i auth)
-app.use((req, res, next) => {
-  console.log('[REQ]', req.method, req.url, 'sid=', req.sessionID, 'auth=', req.isAuthenticated && req.isAuthenticated());
-  next();
-});
-
 app.use(passport.initialize());
 app.use(passport.session());
+
+// debug (po passport) — teraz pokaże true/false
+app.use((req, res, next) => {
+  console.log('[REQ]', req.method, req.url, 'sid=', req.sessionID, 'auth=', req.isAuthenticated());
+  next();
+});
 
 // Statics
 app.use(express.static(path.join(__dirname)));
 
 // ====== Passport Google ======
-passport.serializeUser((user, done) => {
-  console.log('[SERIALIZE]', user && user.id);
-  done(null, user);
-});
-passport.deserializeUser((user, done) => {
-  console.log('[DESERIALIZE]', user && user.id);
-  done(null, user);
-});
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((user, done) => done(null, user));
 
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
@@ -77,7 +69,6 @@ passport.use(new GoogleStrategy({
   callbackURL: process.env.GOOGLE_CALLBACK_URL
 }, async (accessToken, refreshToken, profile, done) => {
   try {
-    console.log('[GOOGLE VERIFY] profile.id=', profile.id);
     const userId = profile.id;
     const userEmail = profile.emails && profile.emails[0] ? profile.emails[0].value : null;
     const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
@@ -100,13 +91,12 @@ passport.use(new GoogleStrategy({
     }
     done(null, { id: userId, email: userEmail, profile, accessToken, refreshToken });
   } catch (err) {
-    console.error('[GOOGLE VERIFY ERROR]', err);
     done(err, null);
   }
 }));
 
 function isLoggedIn(req, res, next) {
-  if (req.isAuthenticated && req.isAuthenticated()) return next();
+  if (req.isAuthenticated()) return next();
   res.status(401).send('Not authenticated');
 }
 
@@ -119,11 +109,7 @@ app.get('/auth/google', passport.authenticate('google', {
 app.get('/auth/google/callback',
   passport.authenticate('google', { failureRedirect: '/' }),
   (req, res) => {
-    console.log('[CALLBACK OK] session=', req.sessionID, 'user=', req.user && req.user.id);
-    req.session.save(err => {
-      if (err) console.error('[SESSION SAVE ERR]', err);
-      res.redirect('/');
-    });
+    req.session.save(() => res.redirect('/'));
   }
 );
 
@@ -131,11 +117,11 @@ app.get('/auth/logout', (req, res, next) => {
   req.logout(err => err ? next(err) : res.redirect('/'));
 });
 
-// ====== Debug helpers ======
+// Debug endpoint
 app.get('/debug/session', (req, res) => {
   res.json({
     sessionID: req.sessionID,
-    isAuthenticated: req.isAuthenticated && req.isAuthenticated(),
+    isAuthenticated: req.isAuthenticated(),
     user: req.user || null,
     cookie: req.headers.cookie || null
   });
@@ -143,10 +129,9 @@ app.get('/debug/session', (req, res) => {
 
 // ====== API ======
 app.get('/api/auth/status', (req, res) => {
-  res.json(req.isAuthenticated && req.isAuthenticated()
+  res.json(req.isAuthenticated()
     ? { loggedIn: true, user: { id: req.user.id, displayName: req.user.profile.displayName, email: req.user.email } }
-    : { loggedIn: false }
-  );
+    : { loggedIn: false });
 });
 
 app.get('/api/data', isLoggedIn, async (req, res) => {
@@ -184,14 +169,13 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
 
     const start = new Date(task.dueDate);
     const end = new Date(start.getTime() + ((task.duration || 30) * 60 * 1000));
-
     const event = {
       summary: task.text,
       description: task.notes || '',
       start: { dateTime: start.toISOString(), timeZone: 'Europe/Warsaw' },
       end:   { dateTime: end.toISOString(),   timeZone: 'Europe/Warsaw' },
       attendees: (task.attendees || []).map(email => ({ email })),
-      conferenceData: task.createMeetLink ? { createRequest: { requestId: uuidv4() } } : undefined
+      conferenceData: task.createMeetLink ? { createRequest: { requestId: require('uuid').v4() } } : undefined
     };
 
     let result;
@@ -211,10 +195,8 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
         conferenceDataVersion: 1
       });
     }
-
     res.json({ status: 'success', data: { ...result.data, action: task.googleCalendarEventId ? 'updated' : 'created' } });
   } catch (err) {
-    console.error('Błąd API Kalendarza:', err?.response?.data || err);
     res.status(500).json({ message: 'Błąd API Kalendarza Google' });
   }
 });
