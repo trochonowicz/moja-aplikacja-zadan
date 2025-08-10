@@ -39,10 +39,10 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Komunikacja z API
     const api = {
-        getStatus: () => fetch('/api/auth/status').then(res => res.json()),
-        getData: () => fetch('/api/data').then(res => res.json()),
-        saveData: (data) => fetch('/api/data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
-        syncTask: (task) => fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task }) }).then(res => res.json())
+        getStatus: () => fetch('/api/auth/status', { credentials: 'same-origin' }).then(res => res.json()),
+        getData: () => fetch('/api/data', { credentials: 'same-origin' }).then(res => res.json()),
+        saveData: (data) => fetch('/api/data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify(data) }),
+        syncTask: (task) => fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ task }) }).then(res => res.json())
     };
 
     // Główna funkcja renderująca

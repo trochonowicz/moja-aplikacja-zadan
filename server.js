@@ -10,6 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const IS_PROD = process.env.NODE_ENV === 'production';
 
 // ====== Baza danych (Render PostgreSQL wymaga SSL) ======
 const pool = new Pool({
@@ -18,16 +19,16 @@ const pool = new Pool({
 });
 
 // ====== Middleware ======
-app.set('trust proxy', 1);
+app.set('trust proxy', 1); // ważne za proxy (Render)
 app.use(express.json());
 app.use(session({
   secret: process.env.SESSION_SECRET || 'change-me',
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: 'auto',         // HTTPS na Renderze => secure
+    secure: IS_PROD,                 // HTTPS na Renderze => true
     httpOnly: true,
-    sameSite: 'lax',
+    sameSite: IS_PROD ? 'none' : 'lax', // 'none' eliminuje problemy z powrotem z Google
     maxAge: 30 * 24 * 60 * 60 * 1000
   }
 }));
@@ -89,7 +90,10 @@ app.get('/auth/google', passport.authenticate('google', {
 
 app.get('/auth/google/callback',
   passport.authenticate('google', { failureRedirect: '/' }),
-  (req, res) => res.redirect('/')
+  (req, res) => {
+    // Upewnij się, że sesja jest zapisana zanim zrobimy redirect
+    req.session.save(() => res.redirect('/'));
+  }
 );
 
 app.get('/auth/logout', (req, res, next) => {
@@ -139,13 +143,10 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
   const calendar = google.calendar({ version: 'v3', auth: oauth2 });
 
   try {
-    // Jeśli usuwamy termin – usuń event
     if (task.googleCalendarEventId && !task.dueDate) {
       await calendar.events.delete({ calendarId: 'primary', eventId: task.googleCalendarEventId, sendUpdates: 'all' });
       return res.json({ status: 'success', data: { action: 'deleted' } });
     }
-
-    // Jeśli nie ma terminu – nic nie rób
     if (!task.dueDate) return res.json({ status: 'success', data: { action: 'none' } });
 
     const start = new Date(task.dueDate);
@@ -185,7 +186,7 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
   }
 });
 
-// ====== SPA catch‑all ======
+// ====== SPA catch-all ======
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
