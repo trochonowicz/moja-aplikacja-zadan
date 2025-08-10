@@ -11,46 +11,51 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// -- Baza danych
+// ====== Baza danych (Render PostgreSQL wymaga SSL) ======
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// -- Ustawienia middleware
+// ====== Middleware ======
 app.set('trust proxy', 1);
 app.use(express.json());
 app.use(session({
-  secret: process.env.SESSION_SECRET,
+  secret: process.env.SESSION_SECRET || 'change-me',
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: 'auto', maxAge: 30 * 24 * 60 * 60 * 1000 }
+  cookie: {
+    secure: 'auto',         // HTTPS na Renderze => secure
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 30 * 24 * 60 * 60 * 1000
+  }
 }));
 app.use(passport.initialize());
 app.use(passport.session());
 
-// -- Serwowanie plików statycznych z katalogu 'public'
-app.use(express.static(path.join(__dirname, 'public')));
+// Serwujemy pliki z katalogu projektu (index.html, css, js)
+app.use(express.static(path.join(__dirname)));
 
-// -- Konfiguracja Passport + Google OAuth2
+// ====== Passport + Google OAuth ======
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((user, done) => done(null, user));
 
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  callbackURL: process.env.GOOGLE_CALLBACK_URL,
-  scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events']
+  callbackURL: process.env.GOOGLE_CALLBACK_URL
 }, async (accessToken, refreshToken, profile, done) => {
   try {
     const userId = profile.id;
-    const userEmail = profile.emails[0].value;
+    const userEmail = profile.emails && profile.emails[0] ? profile.emails[0].value : null;
     const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
 
     if (result.rowCount === 0) {
+      const defaultListId = Date.now();
       const initialData = {
-        lists: [{ id: Date.now(), name: "Moje Zadania", tasks: [], sortMode: "manual" }],
-        activeListId: "today"
+        lists: [{ id: defaultListId, name: "Moje Zadania", tasks: [], sortMode: "manual" }],
+        activeListId: defaultListId
       };
       await pool.query(
         'INSERT INTO users (id, email, data, access_token, refresh_token) VALUES ($1, $2, $3, $4, $5)',
@@ -70,35 +75,43 @@ passport.use(new GoogleStrategy({
   }
 }));
 
-// -- Pomocnik autoryzacji
 function isLoggedIn(req, res, next) {
-  if (req.isAuthenticated()) return next();
+  if (req.isAuthenticated && req.isAuthenticated()) return next();
   res.status(401).send('Not authenticated');
 }
 
-// -- Auth routes
+// ====== Auth routes ======
 app.get('/auth/google', passport.authenticate('google', {
   scope: ['profile', 'email', 'https://www.googleapis.com/auth/calendar.events'],
-  accessType: 'offline', prompt: 'consent'
+  accessType: 'offline',
+  prompt: 'consent'
 }));
-app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/' }), (req, res) => {
-  res.redirect('/');
-});
-app.get('/auth/logout', (req, res, next) => req.logout(err => err ? next(err) : res.redirect('/')));
 
-// -- API: status
+app.get('/auth/google/callback',
+  passport.authenticate('google', { failureRedirect: '/' }),
+  (req, res) => res.redirect('/')
+);
+
+app.get('/auth/logout', (req, res, next) => {
+  req.logout(err => err ? next(err) : res.redirect('/'));
+});
+
+// ====== API ======
 app.get('/api/auth/status', (req, res) => {
-  if (req.isAuthenticated()) {
+  if (req.isAuthenticated && req.isAuthenticated()) {
     res.json({
       loggedIn: true,
-      user: { id: req.user.id, displayName: req.user.profile.displayName, email: req.user.email }
+      user: {
+        id: req.user.id,
+        displayName: req.user.profile.displayName,
+        email: req.user.email
+      }
     });
   } else {
     res.json({ loggedIn: false });
   }
 });
 
-// -- API: pobieranie i zapis danych użytkownika
 app.get('/api/data', isLoggedIn, async (req, res) => {
   try {
     const result = await pool.query('SELECT data FROM users WHERE id = $1', [req.user.id]);
@@ -118,7 +131,6 @@ app.post('/api/data', isLoggedIn, async (req, res) => {
   }
 });
 
-// -- API: synchronizacja z Google Calendar
 app.post('/api/sync', isLoggedIn, async (req, res) => {
   const { task } = req.body;
   const { accessToken, refreshToken } = req.user;
@@ -127,14 +139,18 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
   const calendar = google.calendar({ version: 'v3', auth: oauth2 });
 
   try {
+    // Jeśli usuwamy termin – usuń event
     if (task.googleCalendarEventId && !task.dueDate) {
       await calendar.events.delete({ calendarId: 'primary', eventId: task.googleCalendarEventId, sendUpdates: 'all' });
       return res.json({ status: 'success', data: { action: 'deleted' } });
     }
+
+    // Jeśli nie ma terminu – nic nie rób
     if (!task.dueDate) return res.json({ status: 'success', data: { action: 'none' } });
 
     const start = new Date(task.dueDate);
     const end = new Date(start.getTime() + ((task.duration || 30) * 60 * 1000));
+
     const event = {
       summary: task.text,
       description: task.notes || '',
@@ -146,24 +162,35 @@ app.post('/api/sync', isLoggedIn, async (req, res) => {
 
     let result;
     if (task.googleCalendarEventId) {
-      result = await calendar.events.update({ calendarId: 'primary', eventId: task.googleCalendarEventId, resource: event, sendUpdates: 'all', conferenceDataVersion: 1 });
+      result = await calendar.events.update({
+        calendarId: 'primary',
+        eventId: task.googleCalendarEventId,
+        resource: event,
+        sendUpdates: 'all',
+        conferenceDataVersion: 1
+      });
     } else {
-      result = await calendar.events.insert({ calendarId: 'primary', resource: event, sendUpdates: 'all', conferenceDataVersion: 1 });
+      result = await calendar.events.insert({
+        calendarId: 'primary',
+        resource: event,
+        sendUpdates: 'all',
+        conferenceDataVersion: 1
+      });
     }
 
     res.json({ status: 'success', data: { ...result.data, action: task.googleCalendarEventId ? 'updated' : 'created' } });
   } catch (err) {
-    console.error('Błąd API Kalendarza:', err);
+    console.error('Błąd API Kalendarza:', err?.response?.data || err);
     res.status(500).json({ message: 'Błąd API Kalendarza Google' });
   }
 });
 
-// -- Catch-all dla SPA (wysyłamy index.html z katalogu 'public')
+// ====== SPA catch‑all ======
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// -- Uruchomienie serwera i inicjalizacja tabeli
+// ====== Start ======
 app.listen(PORT, async () => {
   console.log(`Serwer działa na porcie ${PORT}`);
   try {
