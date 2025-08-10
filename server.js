@@ -12,14 +12,15 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_PROD = process.env.NODE_ENV === 'production';
+const PROD_DOMAIN = 'moja-aplikacja-zadan.onrender.com';
 
-// ====== Baza danych ======
+// ====== DB ======
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// ====== Session store w Postgres ======
+// ====== Sessions (Postgres store) ======
 const PgSession = pgSessionFactory(session);
 const sessionStore = new PgSession({
   pool,
@@ -30,28 +31,45 @@ const sessionStore = new PgSession({
 app.set('trust proxy', 1);
 app.use(express.json());
 
+const cookieOptions = {
+  secure: IS_PROD,                  // https only in prod
+  httpOnly: true,
+  sameSite: IS_PROD ? 'lax' : 'lax', // top-level GET nav from Google is OK with LAX
+  maxAge: 30 * 24 * 60 * 60 * 1000,
+  path: '/'
+};
+if (IS_PROD) cookieOptions.domain = PROD_DOMAIN; // przypnij cookie do produkcyjnej domeny
+
 app.use(session({
+  name: 'sid',
   store: sessionStore,
   secret: process.env.SESSION_SECRET || 'change-me',
   resave: false,
   saveUninitialized: false,
-  cookie: {
-    secure: IS_PROD,                         // na Render HTTPS
-    httpOnly: true,
-    sameSite: IS_PROD ? 'none' : 'lax',      // Google OAuth wymaga 'none' przy przekierowaniu
-    maxAge: 30 * 24 * 60 * 60 * 1000
-  }
+  cookie: cookieOptions
 }));
+
+// debug middleware (loguj ID sesji i auth)
+app.use((req, res, next) => {
+  console.log('[REQ]', req.method, req.url, 'sid=', req.sessionID, 'auth=', req.isAuthenticated && req.isAuthenticated());
+  next();
+});
 
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Statyki (index.html, css, js)
+// Statics
 app.use(express.static(path.join(__dirname)));
 
-// ====== Passport + Google OAuth ======
-passport.serializeUser((user, done) => done(null, user));
-passport.deserializeUser((user, done) => done(null, user));
+// ====== Passport Google ======
+passport.serializeUser((user, done) => {
+  console.log('[SERIALIZE]', user && user.id);
+  done(null, user);
+});
+passport.deserializeUser((user, done) => {
+  console.log('[DESERIALIZE]', user && user.id);
+  done(null, user);
+});
 
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
@@ -59,6 +77,7 @@ passport.use(new GoogleStrategy({
   callbackURL: process.env.GOOGLE_CALLBACK_URL
 }, async (accessToken, refreshToken, profile, done) => {
   try {
+    console.log('[GOOGLE VERIFY] profile.id=', profile.id);
     const userId = profile.id;
     const userEmail = profile.emails && profile.emails[0] ? profile.emails[0].value : null;
     const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
@@ -79,10 +98,9 @@ passport.use(new GoogleStrategy({
         [accessToken, refreshToken || result.rows[0].refresh_token, userId]
       );
     }
-
-    const user = { id: userId, email: userEmail, profile, accessToken, refreshToken };
-    done(null, user);
+    done(null, { id: userId, email: userEmail, profile, accessToken, refreshToken });
   } catch (err) {
+    console.error('[GOOGLE VERIFY ERROR]', err);
     done(err, null);
   }
 }));
@@ -101,7 +119,11 @@ app.get('/auth/google', passport.authenticate('google', {
 app.get('/auth/google/callback',
   passport.authenticate('google', { failureRedirect: '/' }),
   (req, res) => {
-    req.session.save(() => res.redirect('/'));
+    console.log('[CALLBACK OK] session=', req.sessionID, 'user=', req.user && req.user.id);
+    req.session.save(err => {
+      if (err) console.error('[SESSION SAVE ERR]', err);
+      res.redirect('/');
+    });
   }
 );
 
@@ -109,20 +131,22 @@ app.get('/auth/logout', (req, res, next) => {
   req.logout(err => err ? next(err) : res.redirect('/'));
 });
 
+// ====== Debug helpers ======
+app.get('/debug/session', (req, res) => {
+  res.json({
+    sessionID: req.sessionID,
+    isAuthenticated: req.isAuthenticated && req.isAuthenticated(),
+    user: req.user || null,
+    cookie: req.headers.cookie || null
+  });
+});
+
 // ====== API ======
 app.get('/api/auth/status', (req, res) => {
-  if (req.isAuthenticated && req.isAuthenticated()) {
-    res.json({
-      loggedIn: true,
-      user: {
-        id: req.user.id,
-        displayName: req.user.profile.displayName,
-        email: req.user.email
-      }
-    });
-  } else {
-    res.json({ loggedIn: false });
-  }
+  res.json(req.isAuthenticated && req.isAuthenticated()
+    ? { loggedIn: true, user: { id: req.user.id, displayName: req.user.profile.displayName, email: req.user.email } }
+    : { loggedIn: false }
+  );
 });
 
 app.get('/api/data', isLoggedIn, async (req, res) => {
@@ -213,8 +237,6 @@ app.listen(PORT, async () => {
       );
     `);
     console.log("Tabela 'users' gotowa.");
-
-    // connect-pg-simple utworzy tabelę sesji automatycznie (createTableIfMissing)
   } catch (err) {
     console.error("Błąd przy inicjalizacji bazy:", err);
   }
